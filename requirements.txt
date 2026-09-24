@@ -1,0 +1,7 @@
+pandas
+requests
+pyotp
+logzero
+openai
+websocket-client
+pyinstaller
