@@ -21,7 +21,7 @@ from urllib.parse import urlparse
 # V6.2 STABLE: keep the GUI/agent process lightweight. Trading libraries are
 # bundled by PyInstaller but are imported only by the child engine process.
 
-APP_VERSION = "10.0"
+APP_VERSION = "10.1"
 AGENT_NAME = "Viju_Trade PC V10 Dhan Agent"
 HOST = "0.0.0.0"
 PORT = 8765
@@ -885,7 +885,7 @@ def current_state():
 
 
 class AgentHandler(BaseHTTPRequestHandler):
-    server_version = "VijuTradePC/10.0"
+    server_version = "VijuTradePC/10.1"
 
     def log_message(self, fmt, *args):
         return
