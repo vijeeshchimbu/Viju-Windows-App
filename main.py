@@ -29,7 +29,7 @@ try:
 except Exception:
     pass
 
-APP_VERSION = "6.0"
+APP_VERSION = "6.1"
 AGENT_NAME = "Viju_Trade PC Dhan Agent"
 HOST = "0.0.0.0"
 PORT = 8765
@@ -66,6 +66,11 @@ _engine_started_at = 0.0
 _engine_last_error = ""
 _last_mobile_seen = 0.0
 _last_mobile_device = ""
+_last_mobile_engine_status = "UNKNOWN"
+_requested_host = ""
+_handoff_status = ""
+_handoff_request_time = 0.0
+_handoff_thread = None
 _server = None
 _server_thread = None
 _gui = None
@@ -282,6 +287,16 @@ def engine_runner(path):
     module = importlib.util.module_from_spec(spec)
     sys.modules["viju_synced_engine"] = module
     spec.loader.exec_module(module)
+    # V8.6 host handoff: make the unchanged APK engine's stop hook also watch
+    # the Windows stop-request file, so Dhan logout can finish before takeover.
+    original_stop_hook = getattr(module, "_android_host_stop_requested", None)
+    def _windows_host_stop_requested():
+        file_stop = STOP_REQUEST_FILE.exists()
+        try:
+            return file_stop or (bool(original_stop_hook()) if callable(original_stop_hook) else False)
+        except Exception:
+            return file_stop
+    module._android_host_stop_requested = _windows_host_stop_requested
     fn = getattr(module, "engine_main", None)
     if not callable(fn):
         raise RuntimeError("Synced engine has no engine_main()")
@@ -297,6 +312,10 @@ def start_engine():
         if not ACTIVE_ENGINE.exists():
             return False, "No synced engine. Update the Python engine from the Android APK first."
         try:
+            try:
+                STOP_REQUEST_FILE.unlink(missing_ok=True)
+            except Exception:
+                pass
             if getattr(sys, "frozen", False):
                 cmd = [sys.executable, "--engine-runner", str(ACTIVE_ENGINE)]
             else:
@@ -331,18 +350,27 @@ def stop_engine():
             STOP_REQUEST_FILE.touch(exist_ok=True)
         except Exception:
             pass
+
+    # Do not kill the Dhan engine immediately. The synced Python engine sees the
+    # stop-request file, leaves its loop and performs its normal logout/cleanup.
+    deadline = time.time() + 20.0
+    while p.poll() is None and time.time() < deadline:
+        time.sleep(0.20)
+    if p.poll() is None:
         try:
             p.terminate()
-            p.wait(timeout=8)
+            p.wait(timeout=5)
         except Exception:
             try:
                 p.kill()
                 p.wait(timeout=3)
             except Exception:
                 pass
+    with _state_lock:
         log(f"ENGINE STOP pid={getattr(p, 'pid', '?')}")
-        _engine_process = None
-        return True, "stopped"
+        if _engine_process is p:
+            _engine_process = None
+    return True, "stopped"
 
 
 def validate_engine_text(text):
@@ -428,12 +456,58 @@ def write_request(path: Path, payload=None):
         atomic_json(path, payload)
 
 
+def mobile_engine_recent(seconds=12):
+    return (time.time() - _last_mobile_seen) <= float(seconds)
+
+
+def request_pc_host():
+    global _requested_host, _handoff_status, _handoff_request_time, _handoff_thread
+    with _state_lock:
+        if engine_running():
+            _requested_host = ""
+            _handoff_status = "PC RUNNING"
+            return True, "PC engine already running"
+        if _handoff_thread is not None and _handoff_thread.is_alive():
+            return True, "Host handoff already in progress"
+        _requested_host = "PC"
+        _handoff_status = "WAITING FOR MOBILE ENGINE TO STOP"
+        _handoff_request_time = time.time()
+
+        def worker():
+            global _requested_host, _handoff_status
+            deadline = time.time() + 60.0
+            while time.time() < deadline:
+                # Require an explicit STOPPED heartbeat received after this claim.
+                if (_last_mobile_engine_status == "STOPPED"
+                        and _last_mobile_seen >= _handoff_request_time):
+                    _handoff_status = "MOBILE STOPPED • STARTING PC"
+                    ok, msg = start_engine()
+                    _handoff_status = "PC RUNNING" if ok else ("PC START FAILED: " + str(msg))
+                    _requested_host = ""
+                    log("HOST HANDOFF MOBILE->PC | " + _handoff_status)
+                    return
+                time.sleep(0.25)
+            _handoff_status = "HANDOFF FAILED • MOBILE STOP NOT CONFIRMED"
+            _requested_host = ""
+            log("HOST HANDOFF TIMEOUT | mobile stop not confirmed")
+
+        _handoff_thread = threading.Thread(target=worker, name="VijuHostHandoff", daemon=True)
+        _handoff_thread.start()
+        return True, "Waiting for mobile engine to stop before PC login"
+
+
 def command(action, body=None):
     body = body or {}
     action = str(action or "").strip().upper()
     if action == "ENGINE_START":
+        # Remote Android start is accepted only after Mobile has explicitly
+        # reported STOPPED. This prevents duplicate Dhan sessions.
+        if _last_mobile_engine_status == "RUNNING" and mobile_engine_recent():
+            return False, "Mobile engine is still running"
         ok, msg = start_engine()
         return ok, msg
+    if action == "REQUEST_PC_HOST":
+        return request_pc_host()
     if action == "ENGINE_STOP":
         return stop_engine()
     if action == "ENGINE_RESTART":
@@ -487,6 +561,14 @@ def current_state():
         login = "LOGGED OUT"
     remote = (time.time() - _last_mobile_seen) < 15
     meta = read_json(ENGINE_META, {})
+    if eng:
+        active_host = "PC"
+    elif remote and _last_mobile_engine_status == "RUNNING":
+        active_host = "MOBILE"
+    elif _requested_host:
+        active_host = "SWITCHING_TO_" + _requested_host
+    else:
+        active_host = "NONE"
     service = "\n".join([
         "Broker: DHAN",
         f"Login: {login}",
@@ -509,6 +591,10 @@ def current_state():
         "credentials_ready": credentials_ready(),
         "remote_mobile_connected": remote,
         "remote_mobile_device": _last_mobile_device,
+        "remote_mobile_engine_status": _last_mobile_engine_status,
+        "requested_host": _requested_host,
+        "handoff_status": _handoff_status,
+        "active_host": active_host,
         "service_text": service,
         "market_text": _sanitize_dhan_text(ui.get("live_text") or ("LOGGING IN" if eng else "ENGINE STOPPED")),
         "live_text": _sanitize_dhan_text(ui.get("live_text") or ""),
@@ -582,7 +668,7 @@ class AgentHandler(BaseHTTPRequestHandler):
         self._json(404, {"ok": False, "error": "not found"})
 
     def do_POST(self):
-        global _last_mobile_seen, _last_mobile_device
+        global _last_mobile_seen, _last_mobile_device, _last_mobile_engine_status
         if not self._guard():
             return
         path = urlparse(self.path).path
@@ -591,7 +677,16 @@ class AgentHandler(BaseHTTPRequestHandler):
             if path == "/api/v1/mobile-heartbeat":
                 _last_mobile_seen = time.time()
                 _last_mobile_device = str(body.get("device") or "Android")[:80]
-                self._json(200, {"ok": True, "remote_mobile": "CONNECTED"})
+                status = str(body.get("mobile_engine_status") or "UNKNOWN").strip().upper()
+                if status in ("RUNNING", "STOPPING", "STOPPED"):
+                    _last_mobile_engine_status = status
+                self._json(200, {
+                    "ok": True,
+                    "remote_mobile": "CONNECTED",
+                    "requested_host": _requested_host,
+                    "handoff_status": _handoff_status,
+                    "pc_engine_status": "RUNNING" if engine_running() else "STOPPED",
+                })
                 return
             if path == "/api/v1/command":
                 ok, msg = command(body.get("action"), body)
@@ -667,7 +762,7 @@ def build_gui():
             svc = ttk.LabelFrame(outer, text="SERVICE", padding=10); svc.pack(fill="x", pady=(12, 8))
             ttk.Label(svc, textvariable=self.status_var, font=("Segoe UI", 11)).pack(anchor="w")
             buttons = ttk.Frame(svc); buttons.pack(fill="x", pady=(8, 0))
-            ttk.Button(buttons, text="START ENGINE", command=lambda: self.run_cmd("ENGINE_START")).pack(side="left", expand=True, fill="x", padx=2)
+            ttk.Button(buttons, text="START ENGINE", command=self.start_engine_safe).pack(side="left", expand=True, fill="x", padx=2)
             ttk.Button(buttons, text="STOP ENGINE", command=lambda: self.run_cmd("ENGINE_STOP")).pack(side="left", expand=True, fill="x", padx=2)
             ttk.Button(buttons, text="REFRESH DATA", command=lambda: self.run_cmd("REFRESH")).pack(side="left", expand=True, fill="x", padx=2)
 
@@ -697,6 +792,37 @@ def build_gui():
             if not ok:
                 messagebox.showerror("Viju_Trade", msg)
             self.refresh()
+
+        def start_engine_safe(self):
+            st = current_state()
+            mobile_status = st.get("remote_mobile_engine_status", "UNKNOWN")
+            mobile_connected = bool(st.get("remote_mobile_connected", False))
+            if mobile_status == "RUNNING":
+                if not mobile_connected:
+                    messagebox.showwarning(
+                        "Viju_Trade",
+                        "Mobile was last known RUNNING, but the phone is not reachable now.\n\n"
+                        "PC engine will NOT start because Dhan duplicate login cannot be ruled out."
+                    )
+                    return
+                yes = messagebox.askyesno(
+                    "Switch engine host to PC?",
+                    "Mobile engine is currently RUNNING.\n\n"
+                    "If you continue, Mobile will be told to stop first. "
+                    "PC will wait for the Mobile engine to finish logout and report STOPPED. "
+                    "Only then will the PC engine log in.\n\nContinue?"
+                )
+                if not yes:
+                    return
+                ok, msg = request_pc_host()
+                if not ok:
+                    messagebox.showerror("Viju_Trade", msg)
+                self.refresh()
+                return
+            if mobile_status == "STOPPING":
+                messagebox.showinfo("Viju_Trade", "Mobile engine is still stopping. PC will not log in yet.")
+                return
+            self.run_cmd("ENGINE_START")
 
         def accept_warning(self):
             st = current_state()
@@ -772,7 +898,12 @@ def build_gui():
                 self.market_var.set(st["market_text"])
                 self.transit_var.set(st["transit_text"])
                 self.stats_var.set(st["stats_text"])
-                self.engine_source_var.set(f"Engine source: APK sync only | Engine V{st['engine_version']}")
+                host = st.get("active_host", "NONE")
+                handoff = st.get("handoff_status", "")
+                self.engine_source_var.set(
+                    f"Engine source: APK sync only | Engine V{st['engine_version']} | ACTIVE HOST: {host}"
+                    + (f" | {handoff}" if handoff and "RUNNING" not in handoff else "")
+                )
                 if st["warning_pending"]:
                     self.warning_var.set(f"WARNING #{st['warning_signal_no']} {st['warning_type']} | Premium {st['warning_current_premium']:.2f} | {st['warning_reason']}")
                     self.signal_var.set(str(st["warning_signal_no"]))
