@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - main
+      - v10-pc-base
 
 jobs:
   build:
@@ -29,12 +30,14 @@ jobs:
         shell: pwsh
         run: |
           python -m py_compile main.py
+          python -m py_compile viju_trade_v10.py
           python -c "import ast, pathlib; ast.parse(pathlib.Path('main.py').read_text(encoding='utf-8')); print('main.py syntax OK')"
+          python -c "import pathlib; t=pathlib.Path('viju_trade_v10.py').read_text(encoding='utf-8'); assert 'VERSION = \"10.0\"' in t; assert 'SUPPORTED_BROKERS = (\"DHAN\",)' in t; print('V10 engine validated')"
 
       - name: Build stable portable Windows app
         shell: pwsh
         run: |
-          pyinstaller --noconfirm --clean --onedir --windowed --name Viju_Trade_PC --hidden-import pandas --hidden-import requests --hidden-import pyotp --hidden-import logzero --hidden-import websocket --collect-all openai main.py
+          pyinstaller --noconfirm --clean --onedir --windowed --name Viju_Trade_PC --add-data "viju_trade_v10.py;." --hidden-import pandas --hidden-import requests --hidden-import pyotp --hidden-import logzero --hidden-import websocket --collect-all openai main.py
 
       - name: Verify portable EXE
         shell: pwsh
@@ -46,6 +49,6 @@ jobs:
       - name: Upload stable portable app
         uses: actions/upload-artifact@v4
         with:
-          name: Viju_Trade_PC_STABLE
+          name: Viju_Trade_PC_V10
           path: dist/Viju_Trade_PC/**
           if-no-files-found: error
