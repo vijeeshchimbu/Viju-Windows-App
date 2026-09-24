@@ -21,7 +21,7 @@ from urllib.parse import urlparse
 # V6.2 STABLE: keep the GUI/agent process lightweight. Trading libraries are
 # bundled by PyInstaller but are imported only by the child engine process.
 
-APP_VERSION = "6.2"
+APP_VERSION = "6.3"
 AGENT_NAME = "Viju_Trade PC Dhan Agent"
 HOST = "0.0.0.0"
 PORT = 8765
@@ -231,19 +231,109 @@ def set_token(value):
     _restrict_file(TOKEN_FILE)
 
 
+def _listening_pid_on_port(port):
+    if os.name != "nt":
+        return None
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        r = subprocess.run(["netstat", "-ano", "-p", "tcp"], capture_output=True, text=True,
+                           timeout=4, check=False, creationflags=flags)
+        want = ":" + str(int(port))
+        for raw in r.stdout.splitlines():
+            line = raw.strip()
+            if not line or "LISTENING" not in line.upper():
+                continue
+            parts = line.split()
+            if len(parts) < 5:
+                continue
+            local = parts[1]
+            if local.endswith(want):
+                try:
+                    return int(parts[-1])
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return None
+
+
+def _process_commandline(pid):
+    if os.name != "nt" or not pid:
+        return ""
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        ps = (
+            "$p=Get-CimInstance Win32_Process -Filter \"ProcessId=" + str(int(pid)) + "\";"
+            "if($p){$p.CommandLine}"
+        )
+        r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+                           capture_output=True, text=True, timeout=5, check=False,
+                           creationflags=flags)
+        return (r.stdout or "").strip()
+    except Exception:
+        return ""
+
+
 def retire_legacy_agent():
+    """Retire the old V5 scheduled agent and reclaim port 8765.
+
+    V5 was installed as a scheduled task and can remain alive even after the task
+    is disabled.  The V6.x GUI must own the same IP/port so the Android app keeps
+    using its existing connection settings.
+    """
     if os.name != "nt":
         return
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+    # Stop, disable and remove the known legacy task. Ignore failures because the
+    # current user may not have permission to change a task created differently.
     for args in (
         ["schtasks", "/End", "/TN", "VijuTradeV5Agent"],
         ["schtasks", "/Change", "/TN", "VijuTradeV5Agent", "/Disable"],
+        ["schtasks", "/Delete", "/TN", "VijuTradeV5Agent", "/F"],
     ):
         try:
             subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                           timeout=4, check=False, creationflags=flags)
+                           timeout=5, check=False, creationflags=flags)
         except Exception:
             pass
+
+    # Give the scheduled task a moment to exit.
+    deadline = time.time() + 2.5
+    while time.time() < deadline:
+        pid = _listening_pid_on_port(PORT)
+        if not pid or pid == os.getpid():
+            return
+        time.sleep(0.15)
+
+    # If V5 is still holding 8765, kill only a process that looks like the old
+    # Viju agent. This avoids terminating an unrelated application accidentally.
+    pid = _listening_pid_on_port(PORT)
+    if not pid or pid == os.getpid():
+        return
+    cmd = _process_commandline(pid).lower()
+    known_legacy = (
+        "vijutradev5" in cmd
+        or "viju_trade_v5" in cmd
+        or "viju trade v5" in cmd
+        or ("python" in cmd and ("8765" in cmd or "agent" in cmd or "main.py" in cmd))
+    )
+    if known_legacy:
+        try:
+            subprocess.run(["taskkill", "/PID", str(pid), "/F"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=5, check=False, creationflags=flags)
+            log(f"LEGACY AGENT TERMINATED pid={pid}")
+        except Exception:
+            pass
+
+    # Wait briefly for Windows to release the listening socket.
+    deadline = time.time() + 5.0
+    while time.time() < deadline:
+        pid2 = _listening_pid_on_port(PORT)
+        if not pid2 or pid2 == os.getpid():
+            return
+        time.sleep(0.20)
 
 
 def ensure_project():
@@ -730,7 +820,7 @@ def current_state():
 
 
 class AgentHandler(BaseHTTPRequestHandler):
-    server_version = "VijuTradePC/6.2"
+    server_version = "VijuTradePC/6.3"
 
     def log_message(self, fmt, *args):
         return
@@ -1047,18 +1137,32 @@ def build_gui():
 
 
 def main():
+    # Take ownership of the legacy V5 port before opening the GUI.
     retire_legacy_agent()
     ensure_project()
     tailscale_ip(force=True)
     try:
         start_server()
     except OSError as exc:
-        import tkinter as tk
-        from tkinter import messagebox
-        root = tk.Tk(); root.withdraw()
-        messagebox.showerror("Viju_Trade PC", f"Cannot start PC agent on port {PORT}.\n\nStop the older VijuTradeV5Agent first, then open this app again.\n\n{exc}")
-        root.destroy()
-        return 2
+        # One extra reclaim attempt covers the case where V5 restarted while the
+        # new app was launching.
+        retire_legacy_agent()
+        try:
+            start_server()
+        except OSError as exc2:
+            import tkinter as tk
+            from tkinter import messagebox
+            root = tk.Tk(); root.withdraw()
+            pid = _listening_pid_on_port(PORT)
+            messagebox.showerror(
+                "Viju_Trade PC",
+                f"Port {PORT} is still occupied"
+                + (f" by PID {pid}" if pid else "")
+                + ".\n\nClose the old VijuTradeV5 agent/process once, then reopen this app.\n\n"
+                + str(exc2)
+            )
+            root.destroy()
+            return 2
     global _gui
     _gui = build_gui()
     _gui.mainloop()
