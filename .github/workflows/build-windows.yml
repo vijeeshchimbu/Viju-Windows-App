@@ -32,7 +32,13 @@ jobs:
           python -m py_compile main.py
           python -m py_compile viju_trade_v10.py
           python -c "import ast, pathlib; ast.parse(pathlib.Path('main.py').read_text(encoding='utf-8')); print('main.py syntax OK')"
-          python -c "import pathlib; t=pathlib.Path('viju_trade_v10.py').read_text(encoding='utf-8'); assert 'VERSION = \"10.0\"' in t; assert 'SUPPORTED_BROKERS = (\"DHAN\",)' in t; print('V10 engine validated')"
+          @'
+          import pathlib
+          t = pathlib.Path("viju_trade_v10.py").read_text(encoding="utf-8")
+          assert 'VERSION = "10.0"' in t
+          assert 'SUPPORTED_BROKERS = ("DHAN",)' in t
+          print("V10 engine validated")
+          '@ | python -
 
       - name: Build stable portable Windows app
         shell: pwsh
