@@ -502,8 +502,8 @@ def command(action, body=None):
     if action == "ENGINE_START":
         # Remote Android start is accepted only after Mobile has explicitly
         # reported STOPPED. This prevents duplicate Dhan sessions.
-        if _last_mobile_engine_status == "RUNNING" and mobile_engine_recent():
-            return False, "Mobile engine is still running"
+        if _last_mobile_engine_status in ("RUNNING", "STOPPING") and mobile_engine_recent():
+            return False, "Mobile engine has not confirmed STOPPED yet"
         ok, msg = start_engine()
         return ok, msg
     if action == "REQUEST_PC_HOST":
@@ -914,6 +914,14 @@ def build_gui():
             self.after(2000, self.refresh)
 
         def on_close(self):
+            if engine_running():
+                yes = messagebox.askyesno(
+                    "Close Viju_Trade PC?",
+                    "PC engine is RUNNING. Closing the PC app will first stop the engine and complete its Dhan logout.\n\nContinue?"
+                )
+                if not yes:
+                    return
+                stop_engine()
             try: stop_server()
             except Exception: pass
             self.destroy()
