@@ -509,7 +509,10 @@ def command(action, body=None):
     if action == "REQUEST_PC_HOST":
         return request_pc_host()
     if action == "ENGINE_STOP":
-        return stop_engine()
+        if engine_running():
+            threading.Thread(target=stop_engine, name="VijuRemoteStop", daemon=True).start()
+            return True, "stop requested"
+        return True, "already stopped"
     if action == "ENGINE_RESTART":
         stop_engine(); return start_engine()
     if action in ("REFRESH", "MANUAL_REFRESH"):
