@@ -21,7 +21,7 @@ from urllib.parse import urlparse
 # V6.2 STABLE: keep the GUI/agent process lightweight. Trading libraries are
 # bundled by PyInstaller but are imported only by the child engine process.
 
-APP_VERSION = "6.3"
+APP_VERSION = "6.4"
 AGENT_NAME = "Viju_Trade PC Dhan Agent"
 HOST = "0.0.0.0"
 PORT = 8765
@@ -490,6 +490,25 @@ def start_engine():
             _engine_started_at = time.time()
             _engine_last_error = ""
             log(f"ENGINE START pid={_engine_process.pid}")
+
+            # Catch an immediate packaged-engine crash and return a useful reason
+            # instead of falsely reporting RUNNING.
+            time.sleep(0.80)
+            code = _engine_process.poll()
+            if code is not None:
+                _engine_process = None
+                tail = ""
+                try:
+                    lines = LOG_FILE.read_text(encoding="utf-8", errors="ignore").splitlines()
+                    for line in reversed(lines[-40:]):
+                        if "ENGINE RUNNER ERROR" in line:
+                            tail = line.split("ENGINE RUNNER ERROR", 1)[-1].strip()
+                            break
+                except Exception:
+                    pass
+                _engine_last_error = tail or f"engine process exited immediately (code {code})"
+                log("ENGINE START FAILED " + _engine_last_error)
+                return False, _engine_last_error
             return True, "started"
         except Exception as exc:
             _engine_last_error = f"{type(exc).__name__}: {exc}"
@@ -536,18 +555,22 @@ def validate_engine_text(text):
         raise ValueError("Empty engine")
     if len(text.encode("utf-8")) > 2_500_000:
         raise ValueError("Engine file is too large")
+
+    # The APK is the source of truth and already validates the selected engine.
+    # PC performs safety validation only: valid Python + engine_main(). Older
+    # Viju engines may not declare ENGINE_INTERFACE / SUPPORTED_BROKERS even
+    # though they are valid Dhan engines, so metadata must never block sync.
     compile(text, "active_engine.py", "exec")
     tree = ast.parse(text, "active_engine.py")
     version = "unknown"
     interface = ""
-    brokers = []
     has_main = False
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "engine_main":
             has_main = True
         if isinstance(node, ast.Assign):
             for target in node.targets:
-                if isinstance(target, ast.Name) and target.id in {"VERSION", "ENGINE_INTERFACE", "SUPPORTED_BROKERS"}:
+                if isinstance(target, ast.Name) and target.id in {"VERSION", "ENGINE_INTERFACE"}:
                     try:
                         value = ast.literal_eval(node.value)
                     except Exception:
@@ -556,16 +579,9 @@ def validate_engine_text(text):
                         version = str(value)
                     elif target.id == "ENGINE_INTERFACE":
                         interface = str(value)
-                    elif target.id == "SUPPORTED_BROKERS":
-                        if isinstance(value, (tuple, list, set)):
-                            brokers = [str(x).upper() for x in value]
     if not has_main:
         raise ValueError("Engine must contain engine_main()")
-    if not interface.startswith("ANDROID_"):
-        raise ValueError("Engine interface is not Android-compatible")
-    if "DHAN" not in brokers:
-        raise ValueError("Windows PC accepts only Dhan-capable engines")
-    return version, interface
+    return version, interface or "APK_VALIDATED"
 
 
 def install_synced_engine(text, filename="active_engine.py", supplied_version="", supplied_sha=""):
@@ -820,7 +836,7 @@ def current_state():
 
 
 class AgentHandler(BaseHTTPRequestHandler):
-    server_version = "VijuTradePC/6.3"
+    server_version = "VijuTradePC/6.4"
 
     def log_message(self, fmt, *args):
         return
