@@ -52,7 +52,7 @@ DHAN_KEYS = [
     "DHAN_PIN", "DHAN_TOTP_SECRET", "DHAN_ACCESS_TOKEN", "DHAN_TOKEN_EXPIRY",
     "OPENAI_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID",
 ]
-REQUIRED_KEYS = ["DHAN_CLIENT_ID", "DHAN_API_KEY", "DHAN_API_SECRET", "DHAN_REDIRECT_URL"]
+REQUIRED_KEYS = ["DHAN_CLIENT_ID", "DHAN_API_KEY", "DHAN_API_SECRET", "DHAN_REDIRECT_URL", "OPENAI_API_KEY"]
 SENSITIVE_KEYS = {"DHAN_API_SECRET", "DHAN_PIN", "DHAN_TOTP_SECRET", "DHAN_ACCESS_TOKEN", "OPENAI_API_KEY", "TELEGRAM_BOT_TOKEN"}
 
 _state_lock = threading.RLock()
@@ -763,10 +763,7 @@ def read_text_file(path: Path, default=""):
 
 
 def _sanitize_dhan_text(value):
-    s = str(value or "")
-    s = re.sub(r"ANGEL(?: ONE)? LOGIN:", "DHAN LOGIN:", s, flags=re.I)
-    s = re.sub(r"\bANGEL ONE\b", "DHAN", s, flags=re.I)
-    return s
+    return str(value or "")
 
 
 def current_state():
