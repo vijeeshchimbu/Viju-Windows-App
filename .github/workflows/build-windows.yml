@@ -6,6 +6,7 @@ on:
     branches:
       - main
       - v10-pc-base
+      - v10-pc-watchdog
 
 jobs:
   build:
@@ -45,16 +46,22 @@ jobs:
         run: |
           pyinstaller --noconfirm --clean --onedir --windowed --name Viju_Trade_PC --add-data "viju_trade_v10.py;." --hidden-import pandas --hidden-import requests --hidden-import pyotp --hidden-import logzero --hidden-import websocket --collect-all openai main.py
 
+      - name: Add crash-recovery setup
+        shell: pwsh
+        run: |
+          Copy-Item "Enable_Auto_Restart.ps1" "dist\Viju_Trade_PC\Enable_Auto_Restart.ps1" -Force
+
       - name: Verify portable EXE
         shell: pwsh
         run: |
           if (!(Test-Path "dist\Viju_Trade_PC\Viju_Trade_PC.exe")) { throw "EXE not found" }
+          if (!(Test-Path "dist\Viju_Trade_PC\Enable_Auto_Restart.ps1")) { throw "Crash recovery setup not found" }
           Get-Item "dist\Viju_Trade_PC\Viju_Trade_PC.exe" | Format-List Name,Length,LastWriteTime
           Get-ChildItem "dist\Viju_Trade_PC" | Select-Object Name,Length | Format-Table -AutoSize
 
       - name: Upload stable portable app
         uses: actions/upload-artifact@v4
         with:
-          name: Viju_Trade_PC_V10
+          name: Viju_Trade_PC_V10_1
           path: dist/Viju_Trade_PC/**
           if-no-files-found: error
