@@ -1,4 +1,4 @@
-name: Build Viju Trade Windows EXE
+name: Build Viju Trade Windows Stable
 
 on:
   workflow_dispatch:
@@ -31,20 +31,21 @@ jobs:
           python -m py_compile main.py
           python -c "import ast, pathlib; ast.parse(pathlib.Path('main.py').read_text(encoding='utf-8')); print('main.py syntax OK')"
 
-      - name: Build Viju Trade PC EXE
+      - name: Build stable portable Windows app
         shell: pwsh
         run: |
-          pyinstaller --noconfirm --clean --onefile --windowed --name Viju_Trade_PC --collect-all openai --collect-all logzero --hidden-import websocket main.py
+          pyinstaller --noconfirm --clean --onedir --windowed --name Viju_Trade_PC --hidden-import pandas --hidden-import requests --hidden-import pyotp --hidden-import logzero --hidden-import websocket --collect-all openai main.py
 
-      - name: Verify EXE
+      - name: Verify portable EXE
         shell: pwsh
         run: |
-          if (!(Test-Path "dist\Viju_Trade_PC.exe")) { throw "EXE not found" }
-          Get-Item "dist\Viju_Trade_PC.exe" | Format-List Name,Length,LastWriteTime
+          if (!(Test-Path "dist\Viju_Trade_PC\Viju_Trade_PC.exe")) { throw "EXE not found" }
+          Get-Item "dist\Viju_Trade_PC\Viju_Trade_PC.exe" | Format-List Name,Length,LastWriteTime
+          Get-ChildItem "dist\Viju_Trade_PC" | Select-Object Name,Length | Format-Table -AutoSize
 
-      - name: Upload EXE
+      - name: Upload stable portable app
         uses: actions/upload-artifact@v4
         with:
-          name: Viju_Trade_PC_DHAN
-          path: dist/Viju_Trade_PC.exe
+          name: Viju_Trade_PC_STABLE
+          path: dist/Viju_Trade_PC/**
           if-no-files-found: error
