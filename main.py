@@ -21,8 +21,8 @@ from urllib.parse import urlparse
 # V6.2 STABLE: keep the GUI/agent process lightweight. Trading libraries are
 # bundled by PyInstaller but are imported only by the child engine process.
 
-APP_VERSION = "6.4"
-AGENT_NAME = "Viju_Trade PC Dhan Agent"
+APP_VERSION = "10.0"
+AGENT_NAME = "Viju_Trade PC V10 Dhan Agent"
 HOST = "0.0.0.0"
 PORT = 8765
 MAX_BODY = 3 * 1024 * 1024
@@ -46,6 +46,10 @@ WARNING_DECLINE_FILE = PROJECT_DIR / "warning_decline.request"
 MANUAL_EXIT_FILE = PROJECT_DIR / "manual_exit.request"
 CLOSE_ALL_TRANSITS_FILE = PROJECT_DIR / "close_all_transits.request"
 STOP_REQUEST_FILE = PROJECT_DIR / "stop.request"
+BUNDLED_ENGINE_VERSION = "10.0"
+BUNDLED_ENGINE_FILE = "viju_trade_v10.py"
+CONTROL_AUTHORITY = "MOBILE"
+DEVICE_ROLE = "PC_ENGINE_HOST"
 
 DHAN_KEYS = [
     "DHAN_CLIENT_ID", "DHAN_API_KEY", "DHAN_API_SECRET", "DHAN_REDIRECT_URL",
@@ -336,6 +340,46 @@ def retire_legacy_agent():
         time.sleep(0.20)
 
 
+def _resource_path(name):
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    return base / name
+
+
+def _version_tuple(value):
+    nums = re.findall(r"\d+", str(value or ""))
+    return tuple(int(x) for x in (nums[:3] or ["0"]))
+
+
+def ensure_bundled_v10_engine():
+    """Install V10 only when no engine exists or the persisted engine is older than V10."""
+    bundled = _resource_path(BUNDLED_ENGINE_FILE)
+    if not bundled.exists():
+        return
+    current = read_json(ENGINE_META, {})
+    current_version = str(current.get("version") or current.get("validated_version") or "0")
+    if ACTIVE_ENGINE.exists() and _version_tuple(current_version) >= _version_tuple(BUNDLED_ENGINE_VERSION):
+        return
+    text = bundled.read_text(encoding="utf-8")
+    compile(text, BUNDLED_ENGINE_FILE, "exec")
+    if ACTIVE_ENGINE.exists():
+        try:
+            atomic_write(PREVIOUS_ENGINE, ACTIVE_ENGINE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    atomic_write(ACTIVE_ENGINE, text)
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    atomic_json(ENGINE_META, {
+        "installed_filename": BUNDLED_ENGINE_FILE,
+        "version": BUNDLED_ENGINE_VERSION,
+        "validated_version": BUNDLED_ENGINE_VERSION,
+        "engine_interface": "ANDROID_V31_COMPAT",
+        "sha256": digest,
+        "source": "PC_V10_BUNDLED",
+        "synced_at": datetime.now().isoformat(timespec="seconds"),
+    })
+    log("BUNDLED V10 ENGINE INSTALLED sha256=" + digest[:12])
+
+
 def ensure_project():
     PROJECT_DIR.mkdir(parents=True, exist_ok=True)
     selection = read_json(BROKER_SELECTION_FILE, {})
@@ -343,6 +387,7 @@ def ensure_project():
     selection.setdefault("selection_id", "windows-dhan")
     atomic_json(BROKER_SELECTION_FILE, selection)
     get_token()
+    ensure_bundled_v10_engine()
 
 
 def _discover_tailscale_ip():
@@ -789,12 +834,19 @@ def current_state():
         f"Monitor: {'RUNNING' if eng else 'STOPPED'}",
         f"Credentials: {'READY' if credentials_ready() else 'NOT READY'}",
         "PC Agent: RUNNING",
+        "Control authority: MOBILE",
         f"Remote mobile: {'CONNECTED' if remote else 'DISCONNECTED'}",
-        f"Engine source: APK sync{(' V' + str(meta.get('version'))) if meta.get('version') else ''}",
+        f"Engine source: {str(meta.get('source') or 'LOCAL')} {('V' + str(meta.get('version'))) if meta.get('version') else ''}".strip(),
     ])
     state = {
         "ok": True,
         "version": APP_VERSION,
+        "device_role": DEVICE_ROLE,
+        "control_authority": CONTROL_AUTHORITY,
+        "engine_host": active_host,
+        "data_source": "PC" if eng else "PC_STANDBY",
+        "pc_self_sufficient": True,
+        "state_generated_at": datetime.now().isoformat(timespec="seconds"),
         "agent_status": "RUNNING",
         "engine_status": "RUNNING" if eng else "STOPPED",
         "market_status": str(ui.get("market_state") or "LOGIN"),
@@ -833,7 +885,7 @@ def current_state():
 
 
 class AgentHandler(BaseHTTPRequestHandler):
-    server_version = "VijuTradePC/6.4"
+    server_version = "VijuTradePC/10.0"
 
     def log_message(self, fmt, *args):
         return
@@ -876,7 +928,7 @@ class AgentHandler(BaseHTTPRequestHandler):
             return
         path = urlparse(self.path).path
         if path in ("/", "/api/v1/health"):
-            self._json(200, {"ok": True, "version": APP_VERSION, "agent": "RUNNING", "broker": "DHAN"})
+            self._json(200, {"ok": True, "version": APP_VERSION, "agent": "RUNNING", "broker": "DHAN", "device_role": DEVICE_ROLE, "control_authority": CONTROL_AUTHORITY})
             return
         if path == "/api/v1/state":
             self._json(200, current_state())
@@ -902,6 +954,9 @@ class AgentHandler(BaseHTTPRequestHandler):
                     "requested_host": _requested_host,
                     "handoff_status": _handoff_status,
                     "pc_engine_status": "RUNNING" if engine_running() else "STOPPED",
+                    "device_role": DEVICE_ROLE,
+                    "control_authority": CONTROL_AUTHORITY,
+                    "engine_host": "PC" if engine_running() else "NONE",
                 })
                 return
             if path == "/api/v1/command":
