@@ -12,24 +12,16 @@ import sys
 import threading
 import time
 import types
+import ctypes
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
-# These imports are intentionally visible to PyInstaller. The synced APK engine
-# imports them dynamically when it runs inside the packaged Windows executable.
-try:
-    import pandas  # noqa: F401
-    import requests  # noqa: F401
-    import pyotp  # noqa: F401
-    import logzero  # noqa: F401
-    import openai  # noqa: F401
-    import websocket  # noqa: F401
-except Exception:
-    pass
+# V6.2 STABLE: keep the GUI/agent process lightweight. Trading libraries are
+# bundled by PyInstaller but are imported only by the child engine process.
 
-APP_VERSION = "6.1"
+APP_VERSION = "6.2"
 AGENT_NAME = "Viju_Trade PC Dhan Agent"
 HOST = "0.0.0.0"
 PORT = 8765
@@ -44,6 +36,9 @@ APP_UI_FILE = PROJECT_DIR / "app_ui.json"
 BROKER_STATUS_FILE = PROJECT_DIR / "broker_status.json"
 TOKEN_FILE = PROJECT_DIR / "pc_remote_token.txt"
 LOG_FILE = PROJECT_DIR / "viju_pc_agent.log"
+LEGACY_MIGRATION_FILE = PROJECT_DIR / "legacy_v5_migrated.json"
+SIGNALS_TEXT_FILE = PROJECT_DIR / "signals_today.txt"
+NOTIFICATIONS_TEXT_FILE = PROJECT_DIR / "notifications_today.txt"
 
 MANUAL_REFRESH_FILE = PROJECT_DIR / "manual_refresh.request"
 WARNING_ACCEPT_FILE = PROJECT_DIR / "warning_accept.request"
@@ -57,7 +52,7 @@ DHAN_KEYS = [
     "DHAN_PIN", "DHAN_TOTP_SECRET", "DHAN_ACCESS_TOKEN", "DHAN_TOKEN_EXPIRY",
     "OPENAI_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID",
 ]
-REQUIRED_KEYS = ["DHAN_CLIENT_ID"]
+REQUIRED_KEYS = ["DHAN_CLIENT_ID", "DHAN_API_KEY", "DHAN_API_SECRET", "DHAN_REDIRECT_URL"]
 SENSITIVE_KEYS = {"DHAN_API_SECRET", "DHAN_PIN", "DHAN_TOTP_SECRET", "DHAN_ACCESS_TOKEN", "OPENAI_API_KEY", "TELEGRAM_BOT_TOKEN"}
 
 _state_lock = threading.RLock()
@@ -74,6 +69,9 @@ _handoff_thread = None
 _server = None
 _server_thread = None
 _gui = None
+_tailscale_ip_cache = "UNKNOWN"
+_tailscale_ip_cache_at = 0.0
+_tailscale_lock = threading.Lock()
 
 
 def log(message):
@@ -131,9 +129,34 @@ def save_env(values):
     _restrict_file(SECRETS_FILE)
 
 
+def save_synced_credentials(payload):
+    if not isinstance(payload, dict):
+        raise ValueError("Invalid credential payload")
+    values = {}
+    allowed = set(DHAN_KEYS)
+    for key in allowed:
+        if key in payload:
+            values[key] = str(payload.get(key) or "")
+    if not values.get("DHAN_CLIENT_ID", "").strip():
+        raise ValueError("Dhan client ID missing")
+    save_env(values)
+    atomic_json(BROKER_SELECTION_FILE, {
+        "schema": 1,
+        "broker_selected": "DHAN",
+        "selection_id": str(payload.get("selection_id") or "android-sync"),
+    })
+    log("DHAN CREDENTIALS SYNCED FROM ANDROID")
+    return credentials_ready()
+
+
 def credentials_ready():
     env = load_env_file(SECRETS_FILE)
-    return all(str(env.get(k, "")).strip() for k in REQUIRED_KEYS)
+    if not all(str(env.get(k, "")).strip() for k in REQUIRED_KEYS):
+        return False
+    token = str(env.get("DHAN_ACCESS_TOKEN", "")).strip()
+    pin = str(env.get("DHAN_PIN", "")).strip()
+    totp = str(env.get("DHAN_TOTP_SECRET", "")).strip()
+    return bool(token or (pin and totp))
 
 
 def _restrict_file(path: Path):
@@ -178,6 +201,15 @@ def _migrate_old_token():
 
 def get_token():
     PROJECT_DIR.mkdir(parents=True, exist_ok=True)
+    # One-time compatibility migration: keep the token already stored in the
+    # Android APK for Agent 5.0 so V6.2 replaces the old agent without forcing
+    # the user to re-enter PC credentials.
+    if not LEGACY_MIGRATION_FILE.exists():
+        legacy = _migrate_old_token()
+        if legacy:
+            atomic_write(TOKEN_FILE, legacy + "\n")
+            _restrict_file(TOKEN_FILE)
+        atomic_json(LEGACY_MIGRATION_FILE, {"done": True, "legacy_token_found": bool(legacy)})
     try:
         if TOKEN_FILE.exists():
             t = TOKEN_FILE.read_text(encoding="utf-8").strip()
@@ -185,7 +217,7 @@ def get_token():
                 return t
     except Exception:
         pass
-    t = os.environ.get("VIJU_PC_TOKEN", "").strip() or _migrate_old_token() or secrets.token_urlsafe(32)
+    t = os.environ.get("VIJU_PC_TOKEN", "").strip() or secrets.token_urlsafe(32)
     atomic_write(TOKEN_FILE, t + "\n")
     _restrict_file(TOKEN_FILE)
     return t
@@ -199,6 +231,21 @@ def set_token(value):
     _restrict_file(TOKEN_FILE)
 
 
+def retire_legacy_agent():
+    if os.name != "nt":
+        return
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    for args in (
+        ["schtasks", "/End", "/TN", "VijuTradeV5Agent"],
+        ["schtasks", "/Change", "/TN", "VijuTradeV5Agent", "/Disable"],
+    ):
+        try:
+            subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=4, check=False, creationflags=flags)
+        except Exception:
+            pass
+
+
 def ensure_project():
     PROJECT_DIR.mkdir(parents=True, exist_ok=True)
     selection = read_json(BROKER_SELECTION_FILE, {})
@@ -208,10 +255,11 @@ def ensure_project():
     get_token()
 
 
-def tailscale_ip():
+def _discover_tailscale_ip():
     if os.name == "nt":
         try:
-            r = subprocess.run(["tailscale", "ip", "-4"], capture_output=True, text=True, timeout=3, check=False)
+            r = subprocess.run(["tailscale", "ip", "-4"], capture_output=True, text=True,
+                               timeout=2, check=False, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             for line in r.stdout.splitlines():
                 ip = line.strip()
                 if re.fullmatch(r"100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.\d{1,3}", ip):
@@ -219,7 +267,8 @@ def tailscale_ip():
         except Exception:
             pass
         try:
-            r = subprocess.run(["ipconfig"], capture_output=True, text=True, timeout=3, check=False)
+            r = subprocess.run(["ipconfig"], capture_output=True, text=True, timeout=2, check=False,
+                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             for ip in re.findall(r"IPv4[^:]*:\s*([0-9.]+)", r.stdout):
                 parts = ip.split(".")
                 if len(parts) == 4 and parts[0] == "100" and 64 <= int(parts[1]) <= 127:
@@ -230,6 +279,23 @@ def tailscale_ip():
         return socket.gethostbyname(socket.gethostname())
     except Exception:
         return "UNKNOWN"
+
+
+def tailscale_ip(force=False):
+    global _tailscale_ip_cache, _tailscale_ip_cache_at
+    now = time.time()
+    if not force and _tailscale_ip_cache_at and now - _tailscale_ip_cache_at < 60:
+        return _tailscale_ip_cache
+    if not _tailscale_lock.acquire(blocking=False):
+        return _tailscale_ip_cache
+    try:
+        now = time.time()
+        if force or not _tailscale_ip_cache_at or now - _tailscale_ip_cache_at >= 60:
+            _tailscale_ip_cache = _discover_tailscale_ip()
+            _tailscale_ip_cache_at = time.time()
+        return _tailscale_ip_cache
+    finally:
+        _tailscale_lock.release()
 
 
 def engine_running():
@@ -310,7 +376,9 @@ def start_engine():
         if engine_running():
             return True, "already running"
         if not ACTIVE_ENGINE.exists():
-            return False, "No synced engine. Update the Python engine from the Android APK first."
+            return False, "Engine not synced yet. Open the PC page in Android once and press REFRESH."
+        if not credentials_ready():
+            return False, "Dhan credentials not synced yet. Open the PC page in Android once and press REFRESH."
         try:
             try:
                 STOP_REQUEST_FILE.unlink(missing_ok=True)
@@ -545,7 +613,47 @@ def command(action, body=None):
     if action == "CLOSE_ALL":
         write_request(CLOSE_ALL_TRANSITS_FILE)
         return True, "close all requested"
+    if action == "PC_UI_START":
+        return True, "PC UI already running"
+    if action == "PC_UI_STOP":
+        try:
+            if _gui is not None:
+                _gui.after(0, _gui.iconify)
+        except Exception:
+            pass
+        return True, "PC UI minimized"
+    if action == "PC_DISPLAY_OFF":
+        try:
+            ctypes.windll.user32.SendMessageW(0xFFFF, 0x0112, 0xF170, 2)
+            return True, "display off requested"
+        except Exception as exc:
+            return False, str(exc)
+    if action == "PC_DISPLAY_ON":
+        try:
+            ctypes.windll.user32.SendMessageW(0xFFFF, 0x0112, 0xF170, -1)
+            return True, "display on requested"
+        except Exception as exc:
+            return False, str(exc)
+    if action == "PC_SHUTDOWN":
+        try:
+            subprocess.Popen(["shutdown", "/s", "/t", "5"], creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            return True, "shutdown requested"
+        except Exception as exc:
+            return False, str(exc)
+    if action == "PC_RESTART":
+        try:
+            subprocess.Popen(["shutdown", "/r", "/t", "5"], creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            return True, "restart requested"
+        except Exception as exc:
+            return False, str(exc)
     return False, "unsupported action"
+
+
+def read_text_file(path: Path, default=""):
+    try:
+        return path.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return default
 
 
 def _sanitize_dhan_text(value):
@@ -615,12 +723,14 @@ def current_state():
         "engine_sha256": str(meta.get("sha256") or ""),
         "engine_sync_source": str(meta.get("source") or ""),
         "last_engine_error": _engine_last_error,
+        "signals_text": read_text_file(SIGNALS_TEXT_FILE, ""),
+        "notifications_text": read_text_file(NOTIFICATIONS_TEXT_FILE, ""),
     }
     return state
 
 
 class AgentHandler(BaseHTTPRequestHandler):
-    server_version = "VijuTradePC/6.0"
+    server_version = "VijuTradePC/6.2"
 
     def log_message(self, fmt, *args):
         return
@@ -703,6 +813,10 @@ class AgentHandler(BaseHTTPRequestHandler):
                     str(body.get("sha256") or ""),
                 )
                 self._json(200, {"ok": True, "installed": result})
+                return
+            if path == "/api/v1/credentials-sync":
+                ready = save_synced_credentials(body.get("secrets") if isinstance(body.get("secrets"), dict) else body)
+                self._json(200, {"ok": True, "credentials_ready": ready})
                 return
             self._json(404, {"ok": False, "error": "not found"})
         except Exception as exc:
@@ -914,7 +1028,7 @@ def build_gui():
                     self.warning_var.set("No pending warning")
             except Exception as exc:
                 self.status_var.set("Agent error: " + str(exc))
-            self.after(2000, self.refresh)
+            self.after(3000, self.refresh)
 
         def on_close(self):
             if engine_running():
@@ -933,7 +1047,9 @@ def build_gui():
 
 
 def main():
+    retire_legacy_agent()
     ensure_project()
+    tailscale_ip(force=True)
     try:
         start_server()
     except OSError as exc:
