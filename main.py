@@ -21,7 +21,7 @@ from urllib.parse import urlparse
 # V6.2 STABLE: keep the GUI/agent process lightweight. Trading libraries are
 # bundled by PyInstaller but are imported only by the child engine process.
 
-APP_VERSION = "6.4"
+APP_VERSION = "6.5"
 AGENT_NAME = "Viju_Trade PC Dhan Agent"
 HOST = "0.0.0.0"
 PORT = 8765
@@ -762,6 +762,75 @@ def read_text_file(path: Path, default=""):
         return default
 
 
+def _pc_export_safe_name(name):
+    name = str(name or "")
+    return bool(
+        re.fullmatch(r"index_.*_signals\\.csv", name)
+        or re.fullmatch(r"index_.*_shadow_learning\\.json", name)
+        or re.fullmatch(r"index_.*_runtime\\.log", name)
+        or re.fullmatch(r"index_.*_heartbeat\\.json", name)
+        or re.fullmatch(r"index_.*_notifications\\.jsonl", name)
+        or name in {
+            "nifty_5m_cache.csv", "index_live_status.json", "app_ui.json",
+            "signals_today.txt", "notifications_today.txt", "lot_settings.json",
+            "daily_research_report.json", "strategy_daily_report.csv",
+            "engine_downtime.csv", "health_events.csv", "health_daily_report.json",
+            "trade_performance_daily.csv", "strategy_performance_daily.csv",
+            "mobile_pc_link_health.csv",
+        }
+    )
+
+
+def pc_export_bundle():
+    """Return safe PC research/export files for Android synchronization.
+
+    Credentials, Dhan sessions, tokens, engine source and other secrets are never
+    included. Text files are capped so a damaged/huge runtime log cannot overload
+    the mobile link.
+    """
+    files = []
+    total = 0
+    max_each = 1024 * 1024
+    max_total = 6 * 1024 * 1024
+    try:
+        candidates = sorted(PROJECT_DIR.iterdir(), key=lambda p: p.name.lower())
+    except Exception:
+        candidates = []
+    for path in candidates:
+        if not path.is_file() or not _pc_export_safe_name(path.name):
+            continue
+        try:
+            raw = path.read_bytes()
+        except Exception:
+            continue
+        if not raw:
+            continue
+        truncated = False
+        if len(raw) > max_each:
+            raw = raw[-max_each:]
+            truncated = True
+        if total + len(raw) > max_total:
+            continue
+        total += len(raw)
+        text_value = raw.decode("utf-8", errors="ignore")
+        files.append({
+            "name": path.name,
+            "size": int(path.stat().st_size),
+            "mtime": float(path.stat().st_mtime),
+            "sha256": hashlib.sha256(raw).hexdigest(),
+            "truncated": truncated,
+            "text": text_value,
+        })
+    return {
+        "ok": True,
+        "schema": 119,
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "file_count": len(files),
+        "payload_bytes": total,
+        "files": files,
+    }
+
+
 def _sanitize_dhan_text(value):
     return str(value or "")
 
@@ -828,12 +897,14 @@ def current_state():
         "last_engine_error": _engine_last_error,
         "signals_text": read_text_file(SIGNALS_TEXT_FILE, ""),
         "notifications_text": read_text_file(NOTIFICATIONS_TEXT_FILE, ""),
+        "export_sync_available": True,
+        "export_sync_schema": 119,
     }
     return state
 
 
 class AgentHandler(BaseHTTPRequestHandler):
-    server_version = "VijuTradePC/6.4"
+    server_version = "VijuTradePC/6.5"
 
     def log_message(self, fmt, *args):
         return
@@ -880,6 +951,9 @@ class AgentHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/v1/state":
             self._json(200, current_state())
+            return
+        if path == "/api/v1/export-sync":
+            self._json(200, pc_export_bundle())
             return
         self._json(404, {"ok": False, "error": "not found"})
 
