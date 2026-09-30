@@ -21,7 +21,7 @@ from urllib.parse import urlparse
 # V6.2 STABLE: keep the GUI/agent process lightweight. Trading libraries are
 # bundled by PyInstaller but are imported only by the child engine process.
 
-APP_VERSION = "6.6"
+APP_VERSION = "6.7"
 AGENT_NAME = "Viju_Trade PC Dhan Agent"
 HOST = "0.0.0.0"
 PORT = 8765
@@ -839,6 +839,27 @@ def _sanitize_dhan_text(value):
     return str(value or "")
 
 
+def _resolve_selected_index(ui):
+    direct = str(ui.get("selected_index") or "").strip().upper()
+    if direct and direct not in {"--", "NONE", "WAITING"}:
+        return direct
+
+    live = read_json(PROJECT_DIR / "index_live_status.json", {})
+    live_index = str(live.get("index") or "").strip().upper()
+    if live_index and live_index not in {"--", "NONE", "WAITING"}:
+        return live_index
+
+    index_line = str(ui.get("index_line") or "").strip()
+    if index_line:
+        m = re.search(r"(?i)(?:TODAY(?:'S)?\s+INDEX\s*:\s*)?\b(SENSEX|BANKNIFTY|MIDCPNIFTY|FINNIFTY|NIFTY)\b", index_line)
+        if m:
+            return m.group(1).upper()
+
+    live_text = str(ui.get("live_text") or "")
+    m = re.search(r"(?i)\b(SENSEX|BANKNIFTY|MIDCPNIFTY|FINNIFTY|NIFTY)\b", live_text)
+    return m.group(1).upper() if m else "--"
+
+
 def current_state():
     ui = read_json(APP_UI_FILE, {})
     broker = read_json(BROKER_STATUS_FILE, {})
@@ -848,6 +869,14 @@ def current_state():
         login = "LOGGED OUT"
     remote = (time.time() - _last_mobile_seen) < 15
     meta = read_json(ENGINE_META, {})
+    selected_index = _resolve_selected_index(ui)
+    active_transits_ui = ui.get("active_transits_ui") if isinstance(ui.get("active_transits_ui"), list) else []
+    warning_pending = bool(ui.get("warning_pending", False))
+    raw_transit_text = str(ui.get("transit_text") or "NO ACTIVE TRANSIT").strip()
+    if not active_transits_ui and not warning_pending and raw_transit_text.upper().startswith("NO ACTIVE TRANSIT"):
+        transit_text = "NO ACTIVE TRANSIT"
+    else:
+        transit_text = raw_transit_text or "NO ACTIVE TRANSIT"
     if eng:
         active_host = "PC"
     elif remote and _last_mobile_engine_status == "RUNNING":
@@ -871,7 +900,7 @@ def current_state():
         "agent_status": "RUNNING",
         "engine_status": "RUNNING" if eng else "STOPPED",
         "market_status": str(ui.get("market_state") or "LOGIN"),
-        "selected_index": str(ui.get("selected_index") or "--"),
+        "selected_index": selected_index,
         "tailscale_ip": tailscale_ip(),
         "broker": "DHAN",
         "broker_selected": "DHAN",
@@ -886,16 +915,16 @@ def current_state():
         "service_text": service,
         "market_text": _sanitize_dhan_text(ui.get("live_text") or ("LOGGING IN" if eng else "ENGINE STOPPED")),
         "live_text": _sanitize_dhan_text(ui.get("live_text") or ""),
-        "transit_text": str(ui.get("transit_text") or "NO ACTIVE TRANSIT"),
+        "transit_text": transit_text,
         "stats_text": str(ui.get("stats_text") or "No signals yet."),
-        "warning_pending": bool(ui.get("warning_pending", False)),
+        "warning_pending": warning_pending,
         "warning_signal_no": int(ui.get("warning_signal_no") or 0),
         "warning_type": str(ui.get("warning_type") or ""),
         "warning_reason": str(ui.get("warning_reason") or ""),
         "warning_current_premium": float(ui.get("warning_current_premium") or 0),
         "warning_accept_label": str(ui.get("warning_accept_label") or "ACCEPT"),
         "warning_decline_label": str(ui.get("warning_decline_label") or "DECLINE"),
-        "active_transits_ui": ui.get("active_transits_ui") if isinstance(ui.get("active_transits_ui"), list) else [],
+        "active_transits_ui": active_transits_ui,
         "engine_version": str(ui.get("engine_version") or meta.get("version") or "--"),
         "engine_sha256": str(meta.get("sha256") or ""),
         "engine_sync_source": str(meta.get("source") or ""),
@@ -911,7 +940,7 @@ def current_state():
 
 
 class AgentHandler(BaseHTTPRequestHandler):
-    server_version = "VijuTradePC/6.6"
+    server_version = "VijuTradePC/6.7"
 
     def log_message(self, fmt, *args):
         return
