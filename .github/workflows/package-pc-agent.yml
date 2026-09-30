@@ -1,0 +1,67 @@
+name: Package Viju Trade PC Agent V6.6
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - ".github/workflows/package-pc-agent.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify V6.6 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q 'APP_VERSION = "6.6"' main.py
+          python -m py_compile main.py
+
+      - name: Build Python-only ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf package
+          mkdir -p package/Viju_Trade_PC_Agent_V6_6
+          cp main.py package/Viju_Trade_PC_Agent_V6_6/main.py
+          cat > package/Viju_Trade_PC_Agent_V6_6/RUN_PC_AGENT.bat <<'BAT'
+@echo off
+cd /d "%~dp0"
+python main.py
+if errorlevel 1 (
+  echo.
+  echo PC Agent stopped with an error.
+  pause
+)
+BAT
+          cat > package/Viju_Trade_PC_Agent_V6_6/README.txt <<'TXT'
+Viju_Trade PC Agent V6.6
+Python-only package. No EXE is included.
+
+Files:
+- main.py            Viju_Trade PC Agent V6.6
+- RUN_PC_AGENT.bat   Starts the agent using installed Python
+
+Use with:
+- Viju_Trade APK V11.10
+- Viju_Trade Python Engine V11.10
+
+The PC agent listens on port 8765 and keeps credentials/tokens locally.
+TXT
+          cd package
+          zip -r ../Viju_Trade_PC_Agent_V6_6.zip Viju_Trade_PC_Agent_V6_6
+
+      - name: Upload ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: Viju_Trade_PC_Agent_V6_6
+          path: Viju_Trade_PC_Agent_V6_6.zip
+          if-no-files-found: error
+          retention-days: 30
