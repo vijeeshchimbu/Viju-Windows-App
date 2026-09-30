@@ -21,7 +21,7 @@ from urllib.parse import urlparse
 # V6.2 STABLE: keep the GUI/agent process lightweight. Trading libraries are
 # bundled by PyInstaller but are imported only by the child engine process.
 
-APP_VERSION = "6.5"
+APP_VERSION = "6.6"
 AGENT_NAME = "Viju_Trade PC Dhan Agent"
 HOST = "0.0.0.0"
 PORT = 8765
@@ -776,6 +776,10 @@ def _pc_export_safe_name(name):
             "daily_research_report.json", "strategy_daily_report.csv",
             "engine_downtime.csv", "health_events.csv", "health_daily_report.json",
             "trade_performance_daily.csv", "strategy_performance_daily.csv",
+            "index_success_record.csv", "index_movement_1m.csv",
+            "index_movement_daily.json", "index_movement_daily.csv",
+            "fvg_retest_observe.csv", "liquidity_sweep_ifvg_cisd_events.csv",
+            "amd_volume_poc_retest_events.csv", "sector_oi_spurt_events.csv",
             "mobile_pc_link_health.csv",
         }
     )
@@ -823,7 +827,7 @@ def pc_export_bundle():
         })
     return {
         "ok": True,
-        "schema": 119,
+        "schema": 120,
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "file_count": len(files),
         "payload_bytes": total,
@@ -867,6 +871,7 @@ def current_state():
         "agent_status": "RUNNING",
         "engine_status": "RUNNING" if eng else "STOPPED",
         "market_status": str(ui.get("market_state") or "LOGIN"),
+        "selected_index": str(ui.get("selected_index") or "--"),
         "tailscale_ip": tailscale_ip(),
         "broker": "DHAN",
         "broker_selected": "DHAN",
@@ -898,13 +903,15 @@ def current_state():
         "signals_text": read_text_file(SIGNALS_TEXT_FILE, ""),
         "notifications_text": read_text_file(NOTIFICATIONS_TEXT_FILE, ""),
         "export_sync_available": True,
-        "export_sync_schema": 119,
+        "export_sync_schema": 120,
+        "report_sync_available": True,
+        "report_sync_schema": 120,
     }
     return state
 
 
 class AgentHandler(BaseHTTPRequestHandler):
-    server_version = "VijuTradePC/6.5"
+    server_version = "VijuTradePC/6.6"
 
     def log_message(self, fmt, *args):
         return
@@ -952,7 +959,7 @@ class AgentHandler(BaseHTTPRequestHandler):
         if path == "/api/v1/state":
             self._json(200, current_state())
             return
-        if path == "/api/v1/export-sync":
+        if path in ("/api/v1/export-sync", "/api/v1/report-sync"):
             self._json(200, pc_export_bundle())
             return
         self._json(404, {"ok": False, "error": "not found"})
