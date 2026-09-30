@@ -1,4 +1,4 @@
-name: Package Viju Trade PC Agent V6.6
+name: Package Viju Trade PC Agent V6.7
 
 on:
   push:
@@ -14,19 +14,19 @@ jobs:
 
       - name: Verify source
         run: |
-          grep -q 'APP_VERSION = "6.6"' main.py
+          grep -q 'APP_VERSION = "6.7"' main.py
           python -m py_compile main.py
 
       - name: Create package
         run: |
-          mkdir -p Viju_Trade_PC_Agent_V6_6
-          cp main.py Viju_Trade_PC_Agent_V6_6/main.py
-          printf '@echo off\r\ncd /d "%%~dp0"\r\npython main.py\r\nif errorlevel 1 pause\r\n' > Viju_Trade_PC_Agent_V6_6/RUN_PC_AGENT.bat
-          printf 'Viju_Trade PC Agent V6.6\nPython-only package - no EXE.\n\nUse with APK V11.10 and Python Engine V11.10.\n' > Viju_Trade_PC_Agent_V6_6/README.txt
-          zip -r Viju_Trade_PC_Agent_V6_6.zip Viju_Trade_PC_Agent_V6_6
+          mkdir -p Viju_Trade_PC_Agent_V6_7
+          cp main.py Viju_Trade_PC_Agent_V6_7/main.py
+          printf '@echo off\r\ncd /d "%%~dp0"\r\npython main.py\r\nif errorlevel 1 pause\r\n' > Viju_Trade_PC_Agent_V6_7/RUN_PC_AGENT.bat
+          printf 'Viju_Trade PC Agent V6.7\nPython-only package - no EXE.\n\nUse with APK V11.10 and Python Engine V11.10.\n' > Viju_Trade_PC_Agent_V6_7/README.txt
+          zip -r Viju_Trade_PC_Agent_V6_7.zip Viju_Trade_PC_Agent_V6_7
 
       - name: Upload package
         uses: actions/upload-artifact@v4
         with:
-          name: Viju_Trade_PC_Agent_V6_6
-          path: Viju_Trade_PC_Agent_V6_6.zip
+          name: Viju_Trade_PC_Agent_V6_7
+          path: Viju_Trade_PC_Agent_V6_7.zip
