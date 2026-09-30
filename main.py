@@ -18,10 +18,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
-# V6.2 STABLE: keep the GUI/agent process lightweight. Trading libraries are
-# bundled by PyInstaller but are imported only by the child engine process.
+# V6.8 PYTHON ONLY: PC Agent runs directly with installed Python.
+# No EXE, PyInstaller bundle, or watchdog process is used.
 
-APP_VERSION = "6.7"
+APP_VERSION = "6.8"
 AGENT_NAME = "Viju_Trade PC Dhan Agent"
 HOST = "0.0.0.0"
 PORT = 8765
@@ -474,10 +474,7 @@ def start_engine():
                 STOP_REQUEST_FILE.unlink(missing_ok=True)
             except Exception:
                 pass
-            if getattr(sys, "frozen", False):
-                cmd = [sys.executable, "--engine-runner", str(ACTIVE_ENGINE)]
-            else:
-                cmd = [sys.executable, str(Path(__file__).resolve()), "--engine-runner", str(ACTIVE_ENGINE)]
+            cmd = [sys.executable, str(Path(__file__).resolve()), "--engine-runner", str(ACTIVE_ENGINE)]
             env = os.environ.copy()
             env.update({
                 "VIJU_BROKER": "DHAN",
@@ -720,7 +717,19 @@ def command(action, body=None):
         write_request(CLOSE_ALL_TRANSITS_FILE)
         return True, "close all requested"
     if action == "PC_UI_START":
-        return True, "PC UI already running"
+        try:
+            if _gui is not None:
+                def _show_ui():
+                    try:
+                        _gui.deiconify()
+                        _gui.lift()
+                        _gui.focus_force()
+                    except Exception:
+                        pass
+                _gui.after(0, _show_ui)
+        except Exception:
+            pass
+        return True, "PC UI shown"
     if action == "PC_UI_STOP":
         try:
             if _gui is not None:
@@ -940,7 +949,7 @@ def current_state():
 
 
 class AgentHandler(BaseHTTPRequestHandler):
-    server_version = "VijuTradePC/6.7"
+    server_version = "VijuTradePC/6.8"
 
     def log_message(self, fmt, *args):
         return
