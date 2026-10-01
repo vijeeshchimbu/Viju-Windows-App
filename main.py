@@ -21,7 +21,7 @@ from urllib.parse import urlparse
 # V6.8 PYTHON ONLY: PC Agent runs directly with installed Python.
 # No EXE, PyInstaller bundle, or watchdog process is used.
 
-APP_VERSION = "6.8"
+APP_VERSION = "6.9"
 AGENT_NAME = "Viju_Trade PC Dhan Agent"
 HOST = "0.0.0.0"
 PORT = 8765
@@ -789,7 +789,7 @@ def _pc_export_safe_name(name):
             "index_movement_daily.json", "index_movement_daily.csv",
             "fvg_retest_observe.csv", "liquidity_sweep_ifvg_cisd_events.csv",
             "amd_volume_poc_retest_events.csv", "sector_oi_spurt_events.csv",
-            "mobile_pc_link_health.csv",
+            "mobile_pc_link_health.csv", "capital_usage_daily.csv",
         }
     )
 
@@ -804,9 +804,12 @@ def pc_export_bundle():
     files = []
     total = 0
     max_each = 1024 * 1024
-    max_total = 6 * 1024 * 1024
+    max_total = 12 * 1024 * 1024
     try:
-        candidates = sorted(PROJECT_DIR.iterdir(), key=lambda p: p.name.lower())
+        candidates = sorted(
+            PROJECT_DIR.iterdir(),
+            key=lambda p: (0 if p.name == "index_v31_signals.csv" else 1, p.name.lower()),
+        )
     except Exception:
         candidates = []
     for path in candidates:
@@ -819,8 +822,9 @@ def pc_export_bundle():
         if not raw:
             continue
         truncated = False
-        if len(raw) > max_each:
-            raw = raw[-max_each:]
+        per_file_limit = 4 * 1024 * 1024 if path.name == "index_v31_signals.csv" else max_each
+        if len(raw) > per_file_limit:
+            raw = raw[-per_file_limit:]
             truncated = True
         if total + len(raw) > max_total:
             continue
@@ -836,7 +840,7 @@ def pc_export_bundle():
         })
     return {
         "ok": True,
-        "schema": 120,
+        "schema": 121,
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "file_count": len(files),
         "payload_bytes": total,
@@ -941,15 +945,15 @@ def current_state():
         "signals_text": read_text_file(SIGNALS_TEXT_FILE, ""),
         "notifications_text": read_text_file(NOTIFICATIONS_TEXT_FILE, ""),
         "export_sync_available": True,
-        "export_sync_schema": 120,
+        "export_sync_schema": 121,
         "report_sync_available": True,
-        "report_sync_schema": 120,
+        "report_sync_schema": 121,
     }
     return state
 
 
 class AgentHandler(BaseHTTPRequestHandler):
-    server_version = "VijuTradePC/6.8"
+    server_version = "VijuTradePC/6.9"
 
     def log_message(self, fmt, *args):
         return
